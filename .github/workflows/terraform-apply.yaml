@@ -90,9 +90,9 @@ jobs:
       - name: Print Check Conditions Outputs
         id: check_conditions_outputs
         run: |
-          echo "name = ${{ inputs.steps.check_conditions.outputs.name }}"
-          echo "execute = ${{ inputs.steps.check_conditions.outputs.execute }}"
-          echo "use_template = ${{ inputs.steps.check_conditions.outputs.use_template }}"
+          echo "name = ${{ steps.check_conditions.outputs.name }}"
+          echo "execute = ${{ steps.check_conditions.outputs.execute }}"
+          echo "use_template = ${{ steps.check_conditions.outputs.use_template }}"
         
       - name: Add deploy key
         if: steps.check_conditions.outputs.execute  == 'true' && steps.check_conditions.outputs.use_template == 'true'

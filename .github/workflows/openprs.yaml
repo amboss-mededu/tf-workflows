@@ -31,6 +31,9 @@ jobs:
           repo: ${{ inputs.REPO_NAME }}
           head: ${{ github.repository_owner }}:${{ github.ref_name }}
           accept: application/vnd.github.v3+json
+          owner: ${{ github.repository_owner }}
+          commiter_name: ${{ github.event.head_commit.committer.name }}
+          event_name: ${{ github.event_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     
@@ -39,4 +42,6 @@ jobs:
         run: |
           COUNT=$(python3 -c 'import json; pr=json.loads(${{ tojson(steps.get_open_prs.outputs.data) }});print(len(pr))')
           echo $COUNT
+          echo $commiter_name
+          echo $event_name
           echo "::set-output name=PR_COUNT::$COUNT"

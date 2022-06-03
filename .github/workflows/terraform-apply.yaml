@@ -1,0 +1,239 @@
+name: Terraform
+on:
+  workflow_call:
+    inputs:
+      DIR:
+        required: true
+        type: string
+      REGION:
+        required: true
+        type: string
+      TF_REGION:
+        type: string
+        required: false
+        default: eu-west-1
+      RUNS_ON:
+        type: string
+        required: false
+        default: self-hosted
+      ACCOUNT_NAME:
+        type: string
+        required: true
+    secrets:
+      IAM_ROLE:
+        required: true
+      DEPLOY_SSH_KEY:
+        required: false
+      ADDITIONAL_ARGS:
+        required: false
+    outputs:
+      PLAN_OUTCOME:
+        value: ${{ jobs.terraform.outputs.PLAN_OUTCOME }}
+      APPLY_OUTCOME:
+        value: ${{ jobs.terraform.outputs.APPLY_OUTCOME }}
+      ACCOUNT_NAME:
+        value: ${{ jobs.terraform.outputs.ACCOUNT_NAME }}
+jobs:
+  terraform:
+    name: Workflow
+    runs-on: ${{ inputs.RUNS_ON }}
+    container: 
+      image: iaacautomation/deploy:v1.5.0
+      env:
+        AWS_WEB_IDENTITY_TOKEN_FILE: /var/run/secrets/eks.amazonaws.com/serviceaccount/token
+        AWS_ROLE_ARN: ${{ secrets.IAM_ROLE }}
+        TF_IN_AUTOMATION: true
+      volumes:
+        - /var/run/secrets/eks.amazonaws.com/serviceaccount/token:/var/run/secrets/eks.amazonaws.com/serviceaccount/token
+    env:
+      TF_IN_AUTOMATION: true
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      PLAN_OUTCOME: ${{ steps.plan.outcome }}
+      APPLY_OUTCOME: ${{ steps.apply.outcome }}
+      ACCOUNT_NAME: ${{ steps.check_conditions.outputs.account_name }}
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
+      packages: read
+    steps:
+      - name: Get Code
+        uses: actions/checkout@v3
+        with:
+          path: deployment
+
+      - name: Check Conditions
+        id: check_conditions
+        run: |
+          echo "::set-output name=account_name::${{ inputs.ACCOUNT_NAME }}"
+          if [[ -d '$GITHUB_WORKSPACE/deployment/${{ inputs.REGION }}/eks' ]]
+          then
+            mkdir -p $GITHUB_WORKSPACE/deployment/${{ inputs.REGION }}/eks_services
+            mkdir -p $GITHUB_WORKSPACE/deployment/${{ inputs.REGION }}/eks_addons
+          fi
+          if [[ -d $GITHUB_WORKSPACE/deployment/${{ inputs.REGION }}/${{ inputs.DIR }} ]]
+          then
+            echo "::set-output name=execute::true"
+          else
+            echo "::set-output name=execute::false"
+          fi
+          if [[ $(expr length "${{ secrets.DEPLOY_SSH_KEY }}") > 0 ]]
+          then
+            echo "::set-output name=use_template::true"
+          else
+            echo "::set-output name=use_template::false"
+          fi
+        
+      - name: Add deploy key
+        if: steps.check_conditions.outputs.execute  == 'true' && steps.check_conditions.outputs.use_template == 'true'
+        uses: webfactory/ssh-agent@v0.5.4
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+      
+      - name: Copy Code
+        if: steps.check_conditions.outputs.execute  == 'true' && steps.check_conditions.outputs.use_template == 'true'
+        run: |
+          git clone git@github.com:amboss-mededu/infra-template template
+          cp -a -n $GITHUB_WORKSPACE/template/${{ inputs.DIR }} $GITHUB_WORKSPACE/deployment/${{ inputs.REGION }}/
+          cp -a -n $GITHUB_WORKSPACE/template/state.tf $GITHUB_WORKSPACE/deployment/${{ inputs.REGION }}/${{ inputs.DIR }}
+
+      - name: TFSec Scan
+        if: steps.check_conditions.outputs.execute  == 'true' && ( github.event_name == 'push' || github.event_name == 'pull_request' )
+        uses: aquasecurity/tfsec-pr-commenter-action@v1.2.0
+        with:
+          github_token: ${{ github.token }}
+          working_directory: deployment/${{ inputs.REGION }}/${{ inputs.DIR }}
+          soft_fail_commenter: true
+
+      - name: Checkov Scan
+        id: checkov
+        if: steps.check_conditions.outputs.execute  == 'true' && (github.event_name == 'push' || github.event_name == 'pull_request' )
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: deployment/${{ inputs.REGION }}/${{ inputs.DIR }}
+          framework: terraform
+          quiet: true
+        continue-on-error: true
+
+      - name: Configure AWS Credentials
+        if: steps.check_conditions.outputs.execute  == 'true' && inputs.RUNS_ON != 'self-hosted'
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-region: ${{ inputs.TF_REGION }}
+          role-to-assume: ${{ secrets.IAM_ROLE }}
+          role-session-name: GithubActions-Terraform
+
+      - name: Setup Terraform
+        if: steps.check_conditions.outputs.execute  == 'true'
+        uses: hashicorp/setup-terraform@v1
+
+      - name: Terraform Init
+        if: steps.check_conditions.outputs.execute  == 'true'
+        id: init
+        run: |
+          rm results.sarif -f
+          cd $GITHUB_WORKSPACE/deployment/${{ inputs.REGION }}/${{ inputs.DIR }}
+          terraform init -backend-config=key="aws-${{ inputs.ACCOUNT_NAME }}/${{ inputs.REGION }}/$(echo "${{ inputs.DIR }}" |sed s/_/-/g ).tfstate"
+         
+      - name: Terraform Plan
+        if: steps.check_conditions.outputs.execute  == 'true'
+        id: plan
+        run: |
+          cd $GITHUB_WORKSPACE/deployment/${{ inputs.REGION }}/${{ inputs.DIR }}
+          terraform plan \
+            -input=false \
+            -var-file=$GITHUB_WORKSPACE/deployment/account_info.tfvars \
+            -var 'region=${{ inputs.REGION }}' \
+            -no-color -lock-timeout=300s \
+            -out=$GITHUB_WORKSPACE/terraform-plan-${{ github.run_id }}.output ${{ secrets.ADDITIONAL_ARGS }}
+        continue-on-error: true
+         
+      - name: Terraform Refresh
+        if: contains(steps.plan.outputs.stdout, 'Objects have changed outside of Terraform') && steps.check_conditions.outputs.execute == 'true'
+        run: |
+          export TF_IN_AUTOMATION=true
+          cd $GITHUB_WORKSPACE/deployment/${{ inputs.REGION }}/${{ inputs.DIR }}
+          terraform refresh \
+            -input=false \
+            -var-file=$GITHUB_WORKSPACE/deployment/account_info.tfvars \
+            -var 'region=${{ inputs.REGION }}'  \
+            -no-color -lock-timeout=300s ${{ secrets.ADDITIONAL_ARGS }}
+          terraform plan \
+            -input=false \
+            -var-file=$GITHUB_WORKSPACE/deployment/account_info.tfvars \
+            -var 'region=${{ inputs.REGION }}' \
+            -no-color -lock-timeout=300s \
+            -out=$GITHUB_WORKSPACE/terraform-plan-${{ github.run_id }}.output ${{ secrets.ADDITIONAL_ARGS }}
+        continue-on-error: true
+
+      - name: Post Plan output to PR
+        uses: actions/github-script@v5
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.merged != true && steps.check_conditions.outputs.execute == 'true' && ! contains(steps.plan.outputs.stdout, 'No changes') && steps.plan.outcome != 'skipped' }}
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Validation 🤖\`${{ steps.validate.outputs.stdout }}\`
+            #### Terraform Plan ${{ inputs.REGION }}/${{ inputs.DIR }}📖\`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`\n
+            ${process.env.PLAN}
+            \`\`\`
+
+            </details>
+
+            *Pusher: @${{ github.actor }}*
+            *Action: Plan*
+            *Working Directory: \`${{ inputs.REGION }}/${{ inputs.DIR }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })     
+          
+      - name: Terraform Apply
+        if: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.merged == true && steps.check_conditions.outputs.execute == 'true' && steps.plan.outcome == 'success' && ! contains(steps.plan.outputs.stdout, 'No changes') }}
+        id: apply
+        run: |
+          cd $GITHUB_WORKSPACE/deployment/${{ inputs.REGION }}/${{ inputs.DIR }}
+          terraform apply $GITHUB_WORKSPACE/terraform-plan-${{ github.run_id }}.output
+
+      - name: Post Apply Output to PR
+        if: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.merged == true && steps.check_conditions.outputs.execute == 'true' && steps.plan.outcome == 'success' && ! contains(steps.plan.outputs.stdout, 'No changes') }}
+        uses: actions/github-script@v5
+        env:
+          APPLY: "terraform\n${{ steps.apply.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Apply ${{ inputs.REGION }}/${{ inputs.DIR }}📖\`${{ steps.plan.outcome }}\`
+
+            <details><summary>Apply Output</summary>
+
+            \`\`\`\n
+            ${process.env.APPLY}
+            \`\`\`
+
+            </details>
+
+            *Pusher: @${{ github.actor }}*
+            *Action: Apply*
+            *Working Directory: \`${{ inputs.REGION }}/${{ inputs.DIR }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })

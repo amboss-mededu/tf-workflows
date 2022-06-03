@@ -1,0 +1,42 @@
+name: Open PRs for Branch
+on:
+  workflow_call:
+    inputs:
+      REPO_NAME:
+        type: string
+        required: true
+      RUNS_ON:
+        type: string
+        required: false
+        default: self-hosted
+    outputs:
+      OPEN_PRS:
+        value: ${{ jobs.open_prs.outputs.OPEN_PRS }}
+jobs:
+  open_prs:
+    name: Get Open PRs
+    runs-on: ${{ inputs.RUNS_ON }}
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      OPEN_PRS: ${{ steps.open_pr.outputs.PR_COUNT }}
+    steps:
+      - name: Get Open PRs
+        uses: octokit/request-action@v2.x
+        id: get_open_prs
+        with:
+          route: GET /repos/{owner}/{repo}/pulls
+          owner: ${{ github.repository_owner }}
+          repo: ${{ inputs.REPO_NAME }}
+          head: ${{ github.repository_owner }}:${{ github.ref_name }}
+          accept: application/vnd.github.v3+json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+      - name: Setup Open PR
+        id: open_pr
+        run: |
+          COUNT=$(python3 -c 'import json; pr=json.loads(${{ tojson(steps.get_open_prs.outputs.data) }});print(len(pr))')
+          echo $COUNT
+          echo "::set-output name=PR_COUNT::$COUNT"

@@ -86,6 +86,13 @@ jobs:
           else
             echo "::set-output name=use_template::false"
           fi
+
+      - name: Print Check Conditions Outputs
+        id: check_conditions_outputs
+        run: |
+          echo "name = ${{ inputs.steps.check_conditions.outputs.name }}"
+          echo "execute = ${{ inputs.steps.check_conditions.outputs.execute }}"
+          echo "use_template = ${{ inputs.steps.check_conditions.outputs.use_template }}"
         
       - name: Add deploy key
         if: steps.check_conditions.outputs.execute  == 'true' && steps.check_conditions.outputs.use_template == 'true'
@@ -110,7 +117,7 @@ jobs:
 
       - name: Checkov Scan
         id: checkov
-        if: steps.check_conditions.outputs.execute  == 'true' && (github.event_name == 'push' || github.event_name == 'pull_request' )
+        if: steps.check_conditions.outputs.execute  == 'true' && ( github.event_name == 'push' || github.event_name == 'pull_request' )
         uses: bridgecrewio/checkov-action@master
         with:
           directory: deployment/${{ inputs.REGION }}/${{ inputs.DIR }}

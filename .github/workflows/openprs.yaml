@@ -33,6 +33,7 @@ jobs:
           accept: application/vnd.github.v3+json
           commiter_name: ${{ github.event.head_commit.committer.name }}
           event_name: ${{ github.event_name }}
+          pr_merged: ${{ github.event.pull_request.merged }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     
@@ -41,6 +42,4 @@ jobs:
         run: |
           COUNT=$(python3 -c 'import json; pr=json.loads(${{ tojson(steps.get_open_prs.outputs.data) }});print(len(pr))')
           echo $COUNT
-          echo $commiter_name
-          echo $event_name
           echo "::set-output name=PR_COUNT::$COUNT"
